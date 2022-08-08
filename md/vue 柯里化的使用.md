@@ -1,4 +1,3 @@
-
 ``` typescript
 // src\platforms\web\runtime-with-compiler.ts
 // 通过 template 获取对应的 render 和 staticRenderFns
