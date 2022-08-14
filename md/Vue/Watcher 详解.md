@@ -1,62 +1,12 @@
-基于vue 2.7.3版本
-<details>
-<summary>Observer类</summary>
+本篇文章将会记录本人对 Vue 中 Watcher 的理解，版本为 Vue 2.7.3，适合对 Vue 如何进行观察者和订阅/发布已有一定了解的人。
 
-``` typescript
-// src\core\observer\index.ts
-export class Observer {
-  dep: Dep
-  vmCount: number // number of vms that have this object as root $data
-
-  constructor(public value: any, public shallow = false, public mock = false) {
-    // this.value = value
-    this.dep = mock ? mockDep : new Dep()
-    this.vmCount = 0
-    def(value, '__ob__', this)
-    if (isArray(value)) {
-      if (!mock) {
-        if (hasProto) {
-          /* eslint-disable no-proto */
-          ;(value as any).__proto__ = arrayMethods
-          /* eslint-enable no-proto */
-        } else {
-          for (let i = 0, l = arrayKeys.length; i < l; i++) {
-            const key = arrayKeys[i]
-            def(value, key, arrayMethods[key])
-          }
-        }
-      }
-      if (!shallow) {
-        this.observeArray(value)
-      }
-    } else {
-      /**
-       * Walk through all properties and convert them into
-       * getter/setters. This method should only be called when
-       * value type is Object.
-       */
-      const keys = Object.keys(value)
-      for (let i = 0; i < keys.length; i++) {
-        const key = keys[i]
-        defineReactive(value, key, NO_INIITIAL_VALUE, undefined, shallow, mock)
-      }
-    }
-  }
-
-  /**
-   * Observe a list of Array items.
-   */
-  observeArray(value: any[]) {
-    for (let i = 0, l = value.length; i < l; i++) {
-      observe(value[i], false, this.mock)
-    }
-  }
-}
-```
-</details>
+首先先抛出几个问题，后文将会一一解答
+- Watcher 是什么？他的作用？
+- Watcher 有多少种类型？如何区分？
+- 不同类型的 Watcher 做了什么不同的处理？
 
 <details>
-<summary>Watcher类</summary>
+<summary> Watcher 类代码</summary>
 
 ``` typescript
 // src\core\observer\watcher.ts
@@ -304,75 +254,134 @@ export default class Watcher implements DepTarget {
 ```
 </details>
 
-<details>
-<summary>Dep类</summary>
-
+## Watcher 是什么？他的作用？
+在代码中，作者是如此注释的：
 ``` typescript
-src\core\observer\dep.ts
-export default class Dep {
-  static target?: DepTarget | null
-  id: number
-  subs: Array<DepTarget>
+/**
+ * A watcher parses an expression, collects dependencies,
+ * and fires callback when the expression value changes.
+ * This is used for both the $watch() api and directives.
+ * @internal
+ */
 
-  constructor() {
-    this.id = uid++
-    this.subs = []
-  }
+ /**一个观察者解析一个表达式，收集依赖，
+    并在表达式值更改时触发回调。
+    这用于 $watch() api 和指令。
+ */
+```
+Watcher 即观察者，通过订阅 Dep ( ```Watcher.get()``` )后， Dep 便可以发布更新时通知 Watcher 调用对应回调 ( ```Watcher.get() => Watcher.run() => Watcher.cb.call(this.vm, value, oldValue)``` )。
+Vue 中的作用是，订阅某个值的变化，此值变化时便进行视图的更新。
 
-  addSub(sub: DepTarget) {
-    this.subs.push(sub)
-  }
-
-  removeSub(sub: DepTarget) {
-    remove(this.subs, sub)
-  }
-
-  depend(info?: DebuggerEventExtraInfo) {
-    if (Dep.target) {
-      Dep.target.addDep(this)
-      if (__DEV__ && info && Dep.target.onTrack) {
-        Dep.target.onTrack({
-          effect: Dep.target,
-          ...info
-        })
-      }
+## Watcher 有多少种类型？如何区分？
+关于 Watcher 的类型，我们可以从源码 /src 路径下全局搜索```new Watcher```开始分析。
+这里用伪代码简单概括下：
+``` typescript 
+// 渲染 Watcher ，在 beforeMount 和 mounted 之间创建
+// src\core\instance\lifecycle.ts
+updateComponent = () => {
+    vm._update(vm._render(), hydrating)
+}
+const watcherOptions: WatcherOptions = {
+    before() {
+        if (vm._isMounted && !vm._isDestroyed) {
+            callHook(vm, 'beforeUpdate')
+        }
     }
-  }
+}
 
-  notify(info?: DebuggerEventExtraInfo) {
-    // stabilize the subscriber list first
-    const subs = this.subs.slice()
-    if (__DEV__ && !config.async) {
-      // subs aren't sorted in scheduler if not running async
-      // we need to sort them now to make sure they fire in correct
-      // order
-      subs.sort((a, b) => a.id - b.id)
-    }
-    for (let i = 0, l = subs.length; i < l; i++) {
-      if (__DEV__ && info) {
-        const sub = subs[i]
-        sub.onTrigger &&
-          sub.onTrigger({
-            effect: subs[i],
-            ...info
-          })
-      }
-      subs[i].update()
-    }
+new Watcher(
+    vm,
+    updateComponent,
+    noop, // function noop(a?: any, b?: any, c?: any) {}
+    watcherOptions,
+    true /* isRenderWatcher */
+)
+
+// computed Watcher ，在 beforeCreate 和 created 之间的 initState() => initComputed() 中创建
+// vm.$options.computed 每个属性均对应一个 computed Watcher
+// src\core\instance\state.ts
+const computedWatcherOptions = { lazy: true }
+
+const watchers = (vm._computedWatchers = Object.create(null))
+watchers[key] = new Watcher(
+    vm,
+    getter || noop, // 用户创建的 get || noop
+    noop,
+    computedWatcherOptions
+)
+
+// user Watcher ，在 beforeCreate 和 created 之间的 initState() => initWatch() 中创建
+// vm.$options.watch 上一个属性若是数组，则数组的每个 key 均对应一个 user Watcher；若非数组，则本身对应一个 user watcher
+// src\core\instance\state.ts
+
+interface ComponentOptions {
+  watch?: {
+    [key: string]: WatchOptionItem | WatchOptionItem[]
   }
 }
+
+type WatchOptionItem = string | WatchCallback | ObjectWatchOptionItem
+
+type WatchCallback<T> = (
+  value: T,
+  oldValue: T,
+  onCleanup: (cleanupFn: () => void) => void
+) => void
+
+type ObjectWatchOptionItem = {
+  handler: WatchCallback | string
+  immediate?: boolean // default: false
+  deep?: boolean // default: false
+  flush?: 'pre' | 'post' | 'sync' // default: 'pre'
+  onTrack?: (event: DebuggerEvent) => void
+  onTrigger?: (event: DebuggerEvent) => void
+}
+
+Vue.prototype.$watch = function (
+    expOrFn: string | (() => any),
+    cb: any,
+    options?: Record<string, any>
+  ): Function {
+    const vm: Component = this
+    if (isPlainObject(cb)) {
+      return createWatcher(vm, expOrFn, cb, options)
+    }
+    options = options || {}
+    options.user = true
+    const watcher = new Watcher(vm, expOrFn, cb, options)
+    if (options.immediate) {
+      const info = `callback for immediate watcher "${watcher.expression}"`
+      pushTarget()
+      invokeWithErrorHandling(cb, vm, [watcher.value], vm, info)
+      popTarget()
+    }
+    return function unwatchFn() {
+      watcher.teardown()
+    }
+}
+
+// TIPS：这里可以看出 watch 支持异步而 computed 不支持异步的原因，因为 User Watcher 创建时有传用户配置的 cb 参数而创建 Computed Watcher 时传的是 noop；而在 watch 中，能接受到( oldValue , newValue ) 的是 cb
+
 ```
-</details>
 
-## Observer
-_init() => initData() => observe() => new Observe ，在 vm.__ob__ 属性挂载一个 Observer 实例。将 vm.$options.data 的每个属性通过 defineReative 进行数据劫持（即变成响应式对象），利用闭包为每个属性保存一个 Dep 实例以用于依赖收集，若属性值为对象且为深度观察（默认）oberver() 此属性。
+总结一下， Watcher 有三种类型：
+- Render Watcher ，即渲染 Watcher
+  
+  通过传入的最后一个参数即 isRenderWatcher 来区分，值为 true 时则为渲染 Watcher 
 
-## watcher
-有渲染 watcher ，computed watcher （ $options.computed 中每个属性均有一个）, user watcher （ $options.watch 属性中中每个属性均有一个）三种。
+- Computed Watcher ，即 computed 属性生成的 watcher
 
-Watcher 在 get() （不同类型 watcher 触发的时机不一样）时通过 pushTarget 将自身赋值给 Dep.target ，即成为当前工作的 watcher ，通过传进来的 getter 去触发响应对象下属性的 getter ，把自身加入到此属性的 dep 下的 subs 中，完成订阅。
+  在第四个参数 options 对象中设置 lazy : true 来区分
 
-## Dep
-相当于一个抽屉， Observer 通过它收集依赖和触发依赖 watcher 的更新
+- User Watcher ，即 watch 属性或者 $watch api 生成的 watcher
+  
+  在第四个参数 options 对象中设置 user : true 来区分
+
+## 不同类型的 Watcher 做了什么不同的处理？
 
 
+|  类型/阶段   | 构造阶段  | run()  |  update()  |  调用的回调  |
+|  ----  | ----  | ----  | ----  | ----  |
+| Render Watcher  | 将本 Watcher 实例赋值给 vm._watcher ，一个 VUe 实例对应一个渲染 Watcher | noop |
+| Computed Watcher  | 设置 ```this.dirty = this.lazy = !!options.lazy```，并通过 ```this.lazy``` 来判断是否立即执行 watcher.get() 并赋值给 Watcher.value。若 lazy == true ，则不是立刻执行。 | / |  Watcher.update() 时把 this.dirty 设置为 true 后即返回，此行为与 computed 的缓存有关  | noop |
+| User Watcher  | / | 若是user watcher```{invokeWithErrorHandling(...)}```，若不是```this.cb.call(this.vm, value, oldValue)```  | / | 用户创建的回调 |
